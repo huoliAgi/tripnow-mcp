@@ -84,7 +84,14 @@
 
 ## 鉴权方式
 
-**APIKey**：通过产品服务开通链接提交申请，审核通过后获取专属APIKey，调用接口时在请求头中携带该APIKey完成鉴权
+1. **TripNow 开放平台**：通过产品服务开通链接申请，获取专属 API Key。  
+2. **本 MCP 服务**：不再从环境变量或 `.env` 读取密钥。客户端连接 MCP 时，必须在 **HTTP 请求头** 中携带标准鉴权头：
+
+   ```http
+   Authorization: Bearer <YOUR_API_KEY>
+   ```
+
+   服务端解析该头中的 token，再以此调用 TripNow 上游接口（同样使用 `Authorization: Bearer`）。
 
 **服务开通链接（整体产品）**: [产品服务开通链接待补充]
 
@@ -92,12 +99,12 @@
 
 ### 客户部署服务（情况一）
 
-若客户采用此方式，需提供 api key 以直接调取服务，具体步骤如下：
+若客户采用此方式，需在调用 MCP 的 HTTP 请求上携带 `Authorization: Bearer <API_KEY>`，具体步骤如下：
 
-1. 从产品服务开通链接提交申请，获取专属APIKey；
-2. 查阅产品官方接口文档，按规范构造请求参数；
-3. 在自有系统/平台中集成接口，请求时携带APIKey；
-4. 接收接口返回的JSON格式数据，解析并展示。
+1. 从产品服务开通链接提交申请，获取专属 API Key；
+2. 查阅产品官方接口文档，按规范构造工具参数；
+3. 在 MCP 客户端或网关中为 **连接 MCP 的请求** 设置请求头 `Authorization: Bearer <API_KEY>`；
+4. 接收接口返回的 JSON 格式数据，解析并展示。
 
 ### 安装步骤
 
@@ -121,10 +128,13 @@ pip install httpx>=0.25.0 mcp>=1.0.0 pydantic>=2.0.0
 
 ### 配置 API Key
 
-#### 在 MCP 客户端配置中，可以通过 HTTP Header 传递 API Key：
-- `tripnow-api-key`
-#### 在 MCP 客户端配置中，可以通过环境变量 `tripnow_api_key` 传递 API Key。
-- `tripnow_api_key`
+仅在 **支持为 MCP 连接配置 HTTP 请求头** 的客户端中使用，例如：
+
+| 请求头 | 示例值 |
+|--------|--------|
+| `Authorization` | `Bearer sk-live-xxxx`（将 `sk-live-xxxx` 换为你的真实 API Key） |
+
+不支持再通过环境变量 `tripnow_api_key` 或自定义头 `tripnow-api-key` 传参。
 
 ## 使用方法
 
@@ -138,41 +148,28 @@ python api_mcp.py
 
 #### 在 MCP 客户端中配置
 
-在您的 MCP 客户端配置文件（如 Cursor 的 `mcp.json`）中添加：
+当前实现 **仅从入站 HTTP 请求的 `Authorization: Bearer …` 读取 API Key**，不读取环境变量。纯 STDIO 本地子进程场景下，多数客户端**不会**为每次工具调用附带 MCP 的 HTTP 头，因此 **无法完成鉴权**。若需带 Key 使用本服务，请优先采用下面的 **Streamable HTTP**。
 
-```json
-{
-  "mcpServers": {
-    "tripnow": {
-      "command": "python",
-      "args": [
-        "/path/to/tripnow-mcp/api_mcp.py"
-      ],
-      "env": {
-        "tripnow_api_key": "YOUR_API_KEY"
-      }
-    }
-  }
-}
-```
-
+若仍用 STDIO 做本地调试，需自行确认你的客户端是否能在该传输方式下注入等价鉴权信息（本仓库默认实现不提供 `.env` / 环境变量回退）。
 
 ### 二、Streamable HTTP 方式（推荐）
 
-如果您的 MCP 服务器部署在远程服务器上，可以使用 Streamable HTTP 方式：
+将 MCP 以 HTTP 服务部署后，在客户端为 **连接 MCP 的 URL 请求** 配置请求头 `Authorization`：
 
 ```json
 {
   "mcpServers": {
     "tripnow": {
-      "url": "https://tripnowengine.133.cn/mcp",
+      "url": "https://your-mcp-host.example.com/mcp",
       "headers": {
-        "tripnow-api-key": "YOUR_API_KEY"
+        "Authorization": "Bearer YOUR_API_KEY"
       }
     }
   }
 }
 ```
+
+将 `YOUR_API_KEY` 替换为从产品开通渠道获取的真实 Key（示例形态如 `sk-live-xxxx`）。
 
 ## API 工具说明
 
@@ -317,10 +314,10 @@ messages.append({
 
 ### 错误响应
 
-如果 API Key 未设置或无效，会返回错误信息：
+如果未携带或格式错误的 `Authorization`，会返回错误信息，例如：
 
 ```
-⚠️ **错误**: error: tripnow-api-key not set
+error: missing or invalid Authorization header; expected "Authorization: Bearer <API_KEY>"
 ```
 
 ## 项目结构
@@ -343,14 +340,14 @@ tripnow-mcp/
 python api_mcp.py
 ```
 
-服务器将启动在 Streamable HTTP 模式下，可以通过 HTTP 请求调用。
+默认以 **STDIO** 方式运行（与 `api_mcp.py` 中 `mcp.run()` 一致）。若需 Streamable HTTP，请在代码中改用 `mcp.run(transport="streamable-http")` 并自行处理进程/端口部署。
 
 ### 代码结构说明
 
 - **api_mcp.py**: 
   - 定义 MCP 服务器实例
   - 实现 `chat_completions` 工具
-  - 处理 API Key 获取和 HTTP 请求
+  - 从入站请求头 `Authorization: Bearer …` 解析 API Key，并转发调用 TripNow HTTP 接口
 
 - **models.py**:
   - `Message`: 消息模型
@@ -368,7 +365,7 @@ A: 请访问 TripNow 官方网站或联系客服获取 API Key。
 
 ### Q2: API Key 应该放在哪里？
 
-A: `tripnow-api-key`通过 HTTP Header 传递。`tripnow_api_key`通过环境变量传递
+A: 放在连接 MCP 时的 HTTP 请求头中：`Authorization: Bearer <你的API_KEY>`。不要依赖 `.env` 或环境变量 `tripnow_api_key`。
 
 ### Q3: 支持哪些传输方式？
 
@@ -409,3 +406,6 @@ A: 返回文本格式
 - 支持航铁知识智能问答（票务政策、退改签、行李规定等）
 - 支持多轮对话
 - 支持 STDIO 和 Streamable HTTP 传输方式
+
+### 鉴权调整（当前版本）
+- MCP 侧仅通过入站 HTTP 头 `Authorization: Bearer <API_KEY>` 鉴权，已移除对环境变量及 `tripnow-api-key` 自定义头的依赖
