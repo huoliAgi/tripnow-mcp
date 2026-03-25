@@ -1,6 +1,5 @@
 import json
-import os
-from typing import Type, Any, List
+from typing import Type, Any, List, Optional
 
 import httpx
 import uvicorn
@@ -21,8 +20,8 @@ mcp = FastMCP(
 )
 
 """
-获取环境变量/Header中的API密钥, 用于调用TripNow API
-变量名为: TRIPNOW_API_KEY
+TripNow 上游 API 鉴权：仅接受 MCP 入站 HTTP 请求头
+Authorization: Bearer <API_KEY>（不再读取环境变量或 .env）
 """
 tripnow_api_url = "https://tripnowengine.133.cn/tripnow/v1/chat/completions"
 
@@ -86,157 +85,55 @@ async def chat_completions(ctx: Context,
     return handle_json_response(response, response_format="text", model_class=ChatCompletionResponse)
 
 
+def _get_request_headers(ctx: Context):
+    try:
+        request_context = getattr(ctx, "request_context", None)
+        if request_context:
+            request = getattr(request_context, "request", None)
+            if request:
+                h = getattr(request, "headers", None)
+                if h is not None:
+                    return h
+        request = getattr(ctx, "request", None)
+        if request:
+            h = getattr(request, "headers", None)
+            if h is not None:
+                return h
+        h = getattr(ctx, "headers", None)
+        if h is not None:
+            return h
+    except Exception:
+        pass
+    return None
+
+
+def _bearer_token_from_authorization(auth: str) -> Optional[str]:
+    if not auth or not str(auth).strip():
+        return None
+    auth = str(auth).strip()
+    lower = auth.lower()
+    if lower.startswith("bearer "):
+        token = auth[7:].strip()
+        return token or None
+    return None
+
+
 def get_api_key(ctx: Context) -> str:
     """
-    从header或环境变量中获取TripNow的API Key
+    仅从入站请求的 Authorization 头获取 TripNow API Key：
+    Authorization: Bearer <API_KEY>
     """
-    # 优先从环境变量获取
-    tripnow_api_key = os.getenv("tripnow_api_key", None)
-    
-    # 如果环境变量不存在，尝试从 headers 获取
+    headers = _get_request_headers(ctx)
+    if not headers or not hasattr(headers, "get"):
+        raise Exception(
+            'error: missing request headers; set "Authorization: Bearer <API_KEY>" on the MCP HTTP request'
+        )
+    auth = headers.get("authorization")
+    tripnow_api_key = _bearer_token_from_authorization(auth) if auth else None
     if not tripnow_api_key:
-        # ========== 调试信息：打印 Context 的详细信息 ==========
-        print("=" * 80)
-        print("DEBUG: 开始调试 Context 结构")
-        print("=" * 80)
-        
-        # 打印 Context 对象的所有属性
-        print(f"\n[1] Context 类型: {type(ctx)}")
-        print(f"[2] Context 的所有属性: {dir(ctx)}")
-        
-        # 尝试访问各种可能的属性
-        ctx_attrs_to_check = [
-            'request', 'request_context', 'headers', 
-            'http_request', 'http_headers', 'metadata',
-            'session', 'state', 'extra'
-        ]
-        
-        for attr_name in ctx_attrs_to_check:
-            attr_value = getattr(ctx, attr_name, None)
-            if attr_value is not None:
-                print(f"[3] ctx.{attr_name} 存在，类型: {type(attr_value)}")
-                if hasattr(attr_value, '__dict__'):
-                    print(f"    {attr_name} 的属性: {dir(attr_value)}")
-        
-        # 尝试多种方式获取 headers
-        headers = None
-        headers_source = None
-        
-        try:
-            # 方式1: 从 ctx.request_context.request.headers 获取
-            print("\n[4] 尝试方式1: ctx.request_context.request.headers")
-            request_context = getattr(ctx, 'request_context', None)
-            if request_context:
-                print(f"    request_context 存在，类型: {type(request_context)}")
-                print(f"    request_context 属性: {dir(request_context)}")
-                request = getattr(request_context, 'request', None)
-                if request:
-                    print(f"    request 存在，类型: {type(request)}")
-                    print(f"    request 属性: {dir(request)}")
-                    headers = getattr(request, 'headers', None)
-                    if headers:
-                        headers_source = "ctx.request_context.request.headers"
-                        print(f"    ✓ 成功获取 headers，类型: {type(headers)}")
-            
-            # 方式2: 如果方式1失败，尝试从 ctx.request.headers 获取
-            if not headers:
-                print("\n[5] 尝试方式2: ctx.request.headers")
-                request = getattr(ctx, 'request', None)
-                if request:
-                    print(f"    request 存在，类型: {type(request)}")
-                    print(f"    request 属性: {dir(request)}")
-                    headers = getattr(request, 'headers', None)
-                    if headers:
-                        headers_source = "ctx.request.headers"
-                        print(f"    ✓ 成功获取 headers，类型: {type(headers)}")
-            
-            # 方式3: 如果方式2也失败，尝试直接访问 ctx.headers
-            if not headers:
-                print("\n[6] 尝试方式3: ctx.headers")
-                headers = getattr(ctx, 'headers', None)
-                if headers:
-                    headers_source = "ctx.headers"
-                    print(f"    ✓ 成功获取 headers，类型: {type(headers)}")
-            
-            # 打印 headers 的详细信息
-            if headers:
-                print(f"\n[7] Headers 详细信息 (来源: {headers_source}):")
-                print(f"    Headers 类型: {type(headers)}")
-                print(f"    Headers 属性/方法: {dir(headers)}")
-                
-                # 尝试不同的方式访问 headers 内容
-                if hasattr(headers, 'items'):
-                    print(f"    Headers 内容 (通过 items()):")
-                    try:
-                        for key, value in headers.items():
-                            print(f"      {key}: {value}")
-                    except Exception as e:
-                        print(f"      无法遍历 items(): {e}")
-                
-                if hasattr(headers, 'keys'):
-                    print(f"    Headers 键 (通过 keys()):")
-                    try:
-                        for key in headers.keys():
-                            print(f"      {key}")
-                    except Exception as e:
-                        print(f"      无法遍历 keys(): {e}")
-                
-                if isinstance(headers, dict):
-                    print(f"    Headers 内容 (字典访问):")
-                    for key, value in headers.items():
-                        print(f"      {key}: {value}")
-                
-                # 尝试获取所有可能的 API Key header 名称
-                print(f"\n[8] 尝试获取 API Key (从 {headers_source}):")
-                api_key_candidates = [
-                    "TRIPNOW_API_KEY", "tripnow-api-key", "tripnow_api_key", 
-                    "TRIPNOW-API-KEY", "TripNow-Api-Key", "tripnowapikey"
-                ]
-                
-                for key_name in api_key_candidates:
-                    value = None
-                    # 尝试字典访问
-                    if isinstance(headers, dict):
-                        value = headers.get(key_name)
-                    # 尝试 get 方法
-                    elif hasattr(headers, 'get'):
-                        value = headers.get(key_name)
-                    # 尝试属性访问
-                    else:
-                        value = getattr(headers, key_name, None)
-                    
-                    if value:
-                        print(f"    ✓ 找到 {key_name}: {value[:20]}..." if len(str(value)) > 20 else f"    ✓ 找到 {key_name}: {value}")
-                        tripnow_api_key = value
-                        break
-                    else:
-                        print(f"    ✗ 未找到 {key_name}")
-                
-                # 如果还没找到，打印所有 header 键，方便用户查看
-                if not tripnow_api_key:
-                    print(f"\n[9] 所有可用的 Header 键:")
-                    if isinstance(headers, dict):
-                        for key in headers.keys():
-                            print(f"      - {key}")
-                    elif hasattr(headers, 'keys'):
-                        for key in headers.keys():
-                            print(f"      - {key}")
-                    else:
-                        print(f"      无法列出所有键")
-            else:
-                print("\n[7] ✗ 未能获取到 headers")
-                
-        except Exception as e:
-            print(f"\n[ERROR] 访问 headers 时出错: {type(e).__name__}: {e}")
-            import traceback
-            print(f"        详细错误信息:\n{traceback.format_exc()}")
-        
-        print("\n" + "=" * 80)
-        print(f"DEBUG: 最终结果 - tripnow_api_key = {'已设置' if tripnow_api_key else '未设置'}")
-        print("=" * 80 + "\n")
-    
-    if not tripnow_api_key:
-        raise Exception('error: TRIPNOW_API_KEY not set')
+        raise Exception(
+            'error: missing or invalid Authorization header; expected "Authorization: Bearer <API_KEY>"'
+        )
     return tripnow_api_key
 
 
